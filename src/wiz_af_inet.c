@@ -13,6 +13,7 @@
 
 #include <netdb.h>
 #include <sal.h>
+#include <sal_netif.h>
 
 #include <wiz.h>
 #include <wiz_socket.h>
@@ -77,13 +78,12 @@ static const struct sal_socket_ops wiz_socket_ops =
     NULL,
     NULL,
     NULL,
-
 #ifdef SAL_USING_POSIX
     wiz_poll,
 #endif /* SAL_USING_POSIX */
 };
 
-static struct sal_proto_ops wiz_proto_ops = 
+static const struct sal_netdb_ops wiz_netdb_ops = 
 {
     wiz_gethostbyname,
     NULL,
@@ -91,28 +91,29 @@ static struct sal_proto_ops wiz_proto_ops =
     wiz_freeaddrinfo,
 };
 
-static int wiz_create(struct sal_socket *socket, int type, int protocol)
-{
-    RT_ASSERT(socket);
-
-    //TODO Check type & protocol
-
-    socket->ops = &wiz_socket_ops;
-
-    return 0;
-}
 
 static const struct sal_proto_family wiz_inet_famils =
 {
     AF_WIZ,
     AF_INET,
-    wiz_create,  
-    &wiz_proto_ops,
+    &wiz_socket_ops,
 };
 
 int wiz_inet_init(void)
 {
     sal_proto_family_register(&wiz_inet_famils);
+
+    return 0;
+}
+
+/* wiz network interface operations registered */
+int sal_netif_wiz_ops_register(struct sal_netif *netif)
+{
+    RT_ASSERT(netif);
+
+    netif->family = AF_WIZ;
+    netif->skt_ops = &wiz_socket_ops;
+    netif->netdb_ops = &wiz_netdb_ops;
 
     return 0;
 }

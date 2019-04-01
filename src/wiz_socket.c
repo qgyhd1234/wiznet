@@ -443,8 +443,14 @@ int wiz_shutdown(int socket, int how)
 static int socketaddr_to_ipaddr_port(const struct sockaddr *sockaddr, ip_addr_t *addr, uint16_t *port)
 {
     const struct sockaddr_in* sin = (const struct sockaddr_in*) (const void *) sockaddr;
-
+    
+#if SAL_IPV4 && SAL_IPV6
     (*addr).u_addr.ip4.addr = sin->sin_addr.s_addr;
+#elif SAL_IPV4
+    (*addr).addr = sin->sin_addr.s_addr;
+#elif SAL_IPV6
+    LOG_E("not support IPV6.");
+#endif /* SAL_IPV4 && SAL_IPV6 */
 
     *port = (uint16_t) HTONS_PORT(sin->sin_port);
 
@@ -658,7 +664,7 @@ int wiz_recvfrom(int socket, void *mem, size_t len, int flags, struct sockaddr *
         uint16_t recvsize = getSn_RX_RSR(socket);
         /* receive last transmission of remaining data */
         if(recvsize>0)
-        {    
+        {
             rt_mutex_take(sock->recv_lock, RT_WAITING_FOREVER);
             recv_len = wizchip_recv(socket, mem, len);
             if (recv_len > 0)
@@ -1036,7 +1042,13 @@ struct hostent *wiz_gethostbyname(const char *name)
         rt_strncpy(ipstr, name, rt_strlen(name));
     }
 
+#if SAL_IPV4 && SAL_IPV6
     addr.u_addr.ip4.addr = ipstr_to_u32(ipstr);
+#elif SAL_IPV4
+    addr.addr = ipstr_to_u32(ipstr);
+#elif SAL_IPV6
+    LOG_E("not support IPV6.");
+#endif /* SAL_IPV4 && SAL_IPV6 */
 
     /* fill hostent structure */
     s_hostent_addr = addr;
@@ -1168,11 +1180,17 @@ int wiz_getaddrinfo(const char *nodename, const char *servname, const struct add
                 rt_strncpy(ipstr, nodename, rt_strlen(nodename));
             }
 
+        #if SAL_IPV4 && SAL_IPV6 
             addr.type = IPADDR_TYPE_V4;
-            if ((addr.u_addr.ip4.addr = ipstr_to_u32(ipstr)) == 0)
+            if ((addr.u_addr.ip4.addr = ipstr_to_u32(ip_str)) == 0)
             {
                 return EAI_FAIL;
             }
+        #elif SAL_IPV4
+            addr.addr = ipstr_to_u32(ipstr);
+        #elif SAL_IPV6
+            LOG_E("not support IPV6."); 
+        #endif /* SAL_IPV4 && SAL_IPV6 */
         }
     }
     else
@@ -1204,7 +1222,13 @@ int wiz_getaddrinfo(const char *nodename, const char *servname, const struct add
     sa = (struct sockaddr_storage *) (void *) ((uint8_t *) ai + sizeof(struct addrinfo));
     struct sockaddr_in *sa4 = (struct sockaddr_in *) sa;
     /* set up sockaddr */
+#if SAL_IPV4 && SAL_IPV6
     sa4->sin_addr.s_addr = addr.u_addr.ip4.addr;
+#elif SAL_IPV4
+    sa4->sin_addr.s_addr = addr.addr;
+#elif SAL_IPV6
+    LOG_E("not support IPV6."); 
+#endif /* SAL_IPV4 && SAL_IPV6 */
     sa4->sin_family = AF_INET;
     sa4->sin_len = sizeof(struct sockaddr_in);
     sa4->sin_port = htons((uint16_t )port_nr);

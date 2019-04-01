@@ -20,6 +20,10 @@
 #include <DHCP/wizchip_dhcp.h>
 #endif
 
+#ifdef RT_USING_SAL
+#include <sal_netif.h>
+#endif
+
 #if !defined(WIZ_SPI_DEVICE) || !defined(WIZ_RST_PIN) || !defined(WIZ_IRQ_PIN)
 #error "please config SPI device name, reset pin and irq pin in menuconfig."
 #endif
@@ -40,6 +44,9 @@
 #define IMR_DISCON                     0x02
 #define IMR_CON                        0x01
 #define WIZ_DEFAULT_MAC                "00-E0-81-DC-53-1A"
+
+#define WIZ_ID_LEN                     6
+char wiz_netif_name[WIZ_ID_LEN];
 
 extern struct rt_spi_device *wiz_device;
 extern int wiz_device_init(const char *spi_dev_name, rt_base_t rst_pin, rt_base_t isr_pin);
@@ -345,11 +352,15 @@ static int wiz_netstr_to_array(const char *net_str, uint8_t *net_array)
 /* initialize WIZnet network configures */
 static int wiz_network_init(void)
 {
+    struct sal_netif * netif;
+    wiz_NetInfo net_info;
 #ifndef WIZ_USING_DHCP
     if(wiz_netstr_to_array(WIZ_IPADDR, wiz_net_info.ip) != RT_EOK ||
             wiz_netstr_to_array(WIZ_MSKADDR, wiz_net_info.sn) != RT_EOK ||
                 wiz_netstr_to_array(WIZ_GWADDR, wiz_net_info.gw) != RT_EOK)
     {
+        sal_netif_low_level_set_status(sal_netif_get_by_name(wiz_netif_name), RT_FALSE);
+        sal_netif_low_level_set_link_status(sal_netif_get_by_name(wiz_netif_name), RT_FALSE);
         return -RT_ERROR;
     }
     wiz_net_info.dhcp = NETINFO_STATIC;
@@ -367,10 +378,24 @@ static int wiz_network_init(void)
         if (result != RT_EOK)
         {
             LOG_E("WIZnet network initialize failed, DHCP timeout.");
+            sal_netif_low_level_set_status(sal_netif_get_by_name(wiz_netif_name), RT_FALSE);
+            sal_netif_low_level_set_link_status(sal_netif_get_by_name(wiz_netif_name), RT_FALSE);
             return result;
         }
     }
 #endif
+
+    netif = sal_netif_get_by_name(wiz_netif_name);
+    sal_netif_low_level_set_status(netif, RT_TRUE);
+    sal_netif_low_level_set_link_status(netif, RT_TRUE);
+    ctlnetwork(CN_GET_NETINFO, (void *)&net_info);
+    sal_netif_low_level_set_ipaddr(netif, (const ip_addr_t *)&net_info.ip);
+    sal_netif_low_level_set_gw(netif, (const ip_addr_t *)&net_info.gw);
+    sal_netif_low_level_set_netmask(netif, (const ip_addr_t *)&net_info.sn);
+    sal_netif_low_level_set_dns_server(netif, 0, (const ip_addr_t *)&net_info.dns);
+    memcpy(netif->hwaddr, (const void *)&net_info.mac, netif->hwaddr_len);
+    /* 1 - Static, 2 - DHCP */
+    sal_netif_low_level_set_dhcp_status(netif, net_info.dhcp - 1);
 
     return RT_EOK;
 }
@@ -399,43 +424,6 @@ static int wiz_socket_init(void)
     return RT_EOK;
 }
 
-int wiz_ifconfig(void)
-{
-#define WIZ_ID_LEN           6
-#define WIZ_MAC_LEN          6
-
-    uint8_t interfacce[WIZ_ID_LEN];
-    wiz_NetInfo net_info;
-
-    ctlwizchip(CW_GET_ID, (void*) interfacce);
-    ctlnetwork(CN_GET_NETINFO, (void*) &net_info);
-
-    /* display network information */
-    {
-        uint8_t index = 0;
-
-        rt_kprintf("network interface: %s\n", interfacce);
-        rt_kprintf("MTU: %d\n", getSn_MSSR(0));
-        rt_kprintf("MAC: ");
-        for (index = 0; index < WIZ_MAC_LEN; index ++)
-        {
-            rt_kprintf("%02x ", net_info.mac[index]);
-        }
-        rt_kprintf("\n");
-
-        rt_kprintf("ip address: %d.%d.%d.%d\n", net_info.ip[0], net_info.ip[1],
-                net_info.ip[2], net_info.ip[3]);
-        rt_kprintf("gw address: %d.%d.%d.%d\n", net_info.gw[0], net_info.gw[1],
-                net_info.gw[2], net_info.gw[3]);
-        rt_kprintf("net mask  : %d.%d.%d.%d\n", net_info.sn[0], net_info.sn[1],
-                net_info.sn[2], net_info.sn[3]);
-        rt_kprintf("dns server : %d.%d.%d.%d\n", net_info.dns[0], net_info.dns[1],
-                net_info.dns[2], net_info.dns[3]);
-    }
-
-    return RT_EOK;
-}
-
 /* set WIZnet device MAC address */
 int wiz_set_mac(const char *mac)
 {
@@ -459,8 +447,166 @@ int wiz_set_mac(const char *mac)
 }
 
 static void wiz_dns_time_handler(void* arg)
-{    
+{
+    extern void DNS_time_handler(void);
     DNS_time_handler();
+}
+
+static int wiz_netif_set_up(struct sal_netif *netif)
+{
+    LOG_D("wiz network interface set up status.");
+    return RT_EOK;
+}
+
+static int wiz_netif_set_down(struct sal_netif *netif)
+{
+    LOG_D("wiz network interface set down status.");
+    return RT_EOK;
+}
+
+static int wiz_netif_set_addr_info(struct sal_netif *netif, ip_addr_t *ip_addr, ip_addr_t *netmask, ip_addr_t *gw)
+{
+    rt_err_t result = RT_EOK;
+
+    RT_ASSERT(netif);
+    RT_ASSERT(ip_addr || netmask || gw);
+
+    ctlnetwork(CN_GET_NETINFO, (void *)&wiz_net_info);
+
+    if (ip_addr)
+        rt_memcpy(wiz_net_info.ip, &ip_addr->addr, sizeof(wiz_net_info.ip));
+
+    if (netmask)
+        rt_memcpy(wiz_net_info.sn, &netmask->addr, sizeof(wiz_net_info.sn));
+
+    if (gw)
+        rt_memcpy(wiz_net_info.gw, &gw->addr, sizeof(wiz_net_info.gw));
+
+    if (ctlnetwork(CN_SET_NETINFO, (void *)&wiz_net_info) == RT_EOK)
+    {
+        if (ip_addr)
+            sal_netif_low_level_set_ipaddr(netif, ip_addr);
+
+        if (netmask)
+            sal_netif_low_level_set_netmask(netif, netmask);
+
+        if (gw)
+            sal_netif_low_level_set_gw(netif, gw);
+
+        result = RT_EOK;
+    }
+    else
+    {
+        LOG_E("%s set addr info failed!", wiz_netif_name);
+        result = -RT_ERROR;
+    }
+
+    return result;
+}
+
+static int wiz_netif_set_dns_server(struct sal_netif *netif, ip_addr_t *dns_server)
+{
+    rt_err_t result = RT_EOK;
+
+    RT_ASSERT(netif);
+    RT_ASSERT(dns_server);
+
+    ctlnetwork(CN_GET_NETINFO, (void *)&wiz_net_info);
+
+    rt_memcpy(wiz_net_info.dns, &dns_server->addr, sizeof(wiz_net_info.dns));
+
+    if (ctlnetwork(CN_SET_NETINFO, (void *)&wiz_net_info) == RT_EOK)
+    {
+        sal_netif_low_level_set_dns_server(netif, 0, (const ip_addr_t *)dns_server);
+        result = RT_EOK;
+    }
+    else
+    {
+        LOG_E("%s set dns server failed!", wiz_netif_name);
+        result = -RT_ERROR;
+    }
+
+    return result;
+}
+
+static int wiz_netif_set_dhcp(struct sal_netif *netif, rt_bool_t is_enabled)
+{
+    rt_err_t result = RT_EOK;
+
+    RT_ASSERT(netif);
+
+    ctlnetwork(CN_GET_NETINFO, (void *)&wiz_net_info);
+
+    /* 1 - Static, 2 - DHCP */
+    wiz_net_info.dhcp = is_enabled + 1;
+
+    if (ctlnetwork(CN_SET_NETINFO, (void *)&wiz_net_info) == RT_EOK)
+    {
+        sal_netif_low_level_set_dhcp_status(netif, is_enabled);
+        result = RT_EOK;
+    }
+    else
+    {
+        LOG_E("%s set dhcp info failed!", wiz_netif_name);
+        result = -RT_ERROR;
+    }
+
+    return result;
+}
+
+static int wiz_netif_ping(struct sal_netif *netif, ip_addr_t *ip_addr, size_t data_len,
+                              uint32_t timeout, struct sal_netif_ping_resp *ping_resp)
+{
+    RT_ASSERT(netif);
+    RT_ASSERT(ip_addr);
+    RT_ASSERT(ping_resp);
+
+    extern int wiz_ping(ip_addr_t *ip_addr,  uint32_t times, struct sal_netif_ping_resp *ping_resp);
+
+    return wiz_ping(ip_addr, timeout, ping_resp);
+}
+
+void wiz_netif_netstat(struct sal_netif *netif)
+{
+    // TODO
+    return;
+}
+
+const struct sal_netif_ops sal_wiz_netif_ops =
+{
+    wiz_netif_set_up,
+    wiz_netif_set_down,
+
+    wiz_netif_set_addr_info,
+    wiz_netif_set_dns_server,
+    wiz_netif_set_dhcp,
+
+    wiz_netif_ping,
+    wiz_netif_netstat,
+};
+
+static int wiz_netif_add(const char *name)
+{
+#define ETHERNET_MTU        1472
+#define HWADDR_LEN          6
+    struct sal_netif *sal_netif = RT_NULL;
+
+    sal_netif = (struct sal_netif *)rt_calloc(1, sizeof(struct sal_netif));
+    if (sal_netif == RT_NULL)
+    {
+        return -RT_ENOMEM;
+    }
+
+    sal_netif->flags = SAL_NETIF_FLAG_DHCP;
+    sal_netif->mtu = ETHERNET_MTU;
+    sal_netif->ops = &sal_wiz_netif_ops;
+    sal_netif->hwaddr_len = HWADDR_LEN;
+
+    extern int sal_netif_wiz_ops_register(struct sal_netif * netif);
+    /* set the network interface socket/netdb operations */
+    sal_netif_wiz_ops_register(sal_netif);
+
+    return sal_netif_register(sal_netif, name, RT_NULL);
 }
 
 /* WIZnet initialize device and network */
@@ -486,6 +632,10 @@ int wiz_init(void)
     {
         goto __exit;
     }
+
+    /* Add wiz to the netif list */
+    ctlwizchip(CW_GET_ID, (void*) wiz_netif_name);
+    wiz_netif_add(wiz_netif_name);
 
     /* WIZnet SPI device reset */
     wiz_reset();
@@ -526,7 +676,3 @@ __exit:
     return result;
 }
 INIT_ENV_EXPORT(wiz_init);
-
-#ifdef FINSH_USING_MSH
-MSH_CMD_EXPORT(wiz_ifconfig, WIZnet ifconfig);
-#endif
